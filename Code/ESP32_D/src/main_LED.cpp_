@@ -1,0 +1,42 @@
+#include <Arduino.h>
+#include <Adafruit_NeoPixel.h>
+
+#define PIN 48
+#define NUMPIXELS 1
+
+// Указать тип ленты (обычно NEO_GRB + NEO_KHZ800)
+Adafruit_NeoPixel LED_RGB(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
+
+int brightness = 50; // 0..255
+
+uint32_t colors[] = {
+  LED_RGB.Color(255, 0, 0),   // красный
+  LED_RGB.Color(0, 255, 0),   // зелёный
+  LED_RGB.Color(0, 0, 255),   // синий
+  LED_RGB.Color(255, 255, 0), // жёлтый
+  LED_RGB.Color(0, 255, 255), // циан
+  LED_RGB.Color(255, 0, 255)  // пурпурный
+};
+const int numColors = sizeof(colors) / sizeof(colors[0]);
+int idx = 0;
+
+void setup() {
+  LED_RGB.begin();
+  LED_RGB.setBrightness(brightness);
+  LED_RGB.show(); // гарантированно выключить при старте
+}
+
+void loop() {
+  // 1) Выключить на 1 секунду
+  LED_RGB.setPixelColor(0, 0); // офф
+  LED_RGB.show();
+  delay(1000);
+
+  // 2) Включить на 1 секунду с текущим цветом
+  LED_RGB.setPixelColor(0, colors[idx]);
+  LED_RGB.show();
+  delay(1000);
+
+  // Переход к следующему цвету
+  idx = (idx + 1) % numColors;
+}

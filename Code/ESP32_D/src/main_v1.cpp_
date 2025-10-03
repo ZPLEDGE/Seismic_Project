@@ -1,0 +1,160 @@
+#include <Arduino.h>
+
+#define DT_PIN 26
+#define CLK_PIN 27
+
+#define LED_PIN 25
+
+volatile int encoderPosition = 0;
+volatile int lastCLK = HIGH;
+volatile int lastDT = HIGH;
+volatile unsigned long lastInterruptTime = 0;
+const unsigned long debounceDelay = 10000; // мкс
+
+// === Буфер логов ===
+const int LOG_BUFFER_SIZE = 32;       // сколько логов хранить
+const int LOG_STR_SIZE = 64;          // макс длина строки
+volatile char logBuffer[LOG_BUFFER_SIZE][LOG_STR_SIZE];
+volatile int logHead = 0;
+volatile int logTail = 0;
+
+unsigned long deltaStamp = 0;
+// Добавление лога в ISR (только snprintf + индексное смещение)
+void IRAM_ATTR pushLog(const char *msg) {
+
+  unsigned long timestamp = micros();
+  int next = (logHead + 1) % LOG_BUFFER_SIZE;
+  if (next == logTail) {
+    // буфер полон, лог теряется
+    return;
+  }
+  snprintf((char*)logBuffer[logHead], LOG_STR_SIZE, "%s @ %lu, %lu ", msg, timestamp, timestamp - deltaStamp );
+  logHead = next;
+
+  deltaStamp = timestamp;
+}
+
+// Забор лога из queue (вызывать в loop)
+bool popLog(char *out) {
+  if (logHead == logTail) return false; // пусто
+  strcpy(out, (char*)logBuffer[logTail]);
+  logTail = (logTail + 1) % LOG_BUFFER_SIZE;
+  return true;
+}
+
+
+// ISR для CLK
+void IRAM_ATTR readEncoderCLK() {
+
+  // Toggle LED при каждом прерывании
+  digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+
+  //pushLog("CLK Int.");
+  unsigned long now = micros();    
+  if (now - lastInterruptTime < debounceDelay) return;
+  lastInterruptTime = now;
+
+  pushLog("CLK Int.");
+    
+  int currentCLK = digitalRead(CLK_PIN);
+  int currentDT  = digitalRead(DT_PIN);
+
+  if (currentCLK != lastCLK) {
+    if (currentCLK == LOW) {
+      if (currentDT == HIGH) {
+        encoderPosition--;
+        pushLog("CLK FALL, DIR=CCW");
+      } else {
+        encoderPosition++;
+        pushLog("CLK FALL, DIR=CW");
+      }
+    } else {
+      pushLog("CLK RISE");
+    }
+  }
+
+  lastCLK = currentCLK;
+  lastDT  = currentDT;
+}
+
+// ISR для DT
+void IRAM_ATTR readEncoderDT() {
+
+  // Toggle LED при каждом прерывании
+  digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+  
+  unsigned long now = micros();
+  if (now - lastInterruptTime < debounceDelay) return;
+  lastInterruptTime = now;
+
+  pushLog("DT Int.");
+
+  int currentCLK = digitalRead(CLK_PIN);
+  int currentDT  = digitalRead(DT_PIN);
+
+  if (currentDT != lastDT) {
+    if (currentDT == LOW) {
+      if (currentCLK == HIGH) {
+        encoderPosition++;
+        pushLog("DT FALL, DIR=CW");
+      } else {
+        encoderPosition--;
+        pushLog("DT FALL, DIR=CCW");
+      }
+    } else {
+      pushLog("DT RISE");
+    }
+  }
+
+  lastCLK = currentCLK;
+  lastDT  = currentDT;
+}
+
+
+void setup() {
+  Serial.begin(115200);
+  
+  pinMode(CLK_PIN, INPUT_PULLUP);
+  pinMode(DT_PIN, INPUT_PULLUP);
+
+  pinMode(LED_PIN, OUTPUT);        // LED как выход
+  digitalWrite(LED_PIN, LOW);      // Начальное состояние - выключен
+
+  lastCLK = digitalRead(CLK_PIN);
+  lastDT  = digitalRead(DT_PIN);
+
+  attachInterrupt(digitalPinToInterrupt(CLK_PIN), readEncoderCLK, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(DT_PIN), readEncoderDT, CHANGE);
+
+  Serial.println("=== Энкодер с двойным отслеживанием + лог ===");
+}
+
+
+uint32_t id = 0;
+
+void loop() {
+  static int lastDisplayPosition = 0;
+
+  // выводим позицию
+  if (encoderPosition != lastDisplayPosition) {
+    lastDisplayPosition = encoderPosition;
+    
+    float degrees = (encoderPosition * 360.0) / 20.0;
+    while (degrees < 0) degrees += 360;
+    while (degrees >= 360) degrees -= 360;
+    
+    Serial.println();
+    Serial.printf("%d. Шаги: %4d | Угол: %6.1f°\n",
+                  id++, encoderPosition, degrees);
+  }
+
+  // выводим накопленные логи
+  char msg[LOG_STR_SIZE];
+  while (popLog(msg)) {
+    //Serial.print("LOG: ");
+    Serial.println(msg);
+  }
+
+
+  delay(5);
+}

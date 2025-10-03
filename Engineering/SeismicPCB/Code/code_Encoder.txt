@@ -1,0 +1,159 @@
+File: IEncoder.h
+----------------------------------
+
+class IEncoder {
+public:
+    using StepHandler = std::function<void(int8_t delta)>; // вызывается НЕ из ISR
+
+    virtual ~IEncoder() = default;
+
+    // Инициализация (настройка пинов/ISR)
+    virtual bool begin() = 0;
+
+    // Вызывается из loop()/задачи — вычитывает накопленные шаги и вызывает handler
+    virtual void update() = 0;
+
+    // Регистрация обработчика шагов; вызывается в контексте потока, не ISR
+    virtual void onStep(StepHandler h) = 0;
+};
+
+
+
+
+File: EncoderEC12.cpp
+----------------------------------
+
+
+#include "..\include\drivers\EncoderEC12.h"
+
+#include ".\app\pins.h"
+
+EncoderEC12::EncoderEC12(uint8_t clkPin, uint8_t dtPin, uint32_t debounceUs)
+: clkPin_(clkPin), dtPin_(dtPin), debounceUs_(debounceUs) {}
+
+bool EncoderEC12::begin() {
+    pinMode(clkPin_, INPUT_PULLUP);
+    pinMode(dtPin_,  INPUT_PULLUP);
+
+    lastClk_ = digitalRead(clkPin_);
+    lastDebounceUs_ = micros();
+
+    // Отдельное прерывание на CLK с передачей this
+    attachInterruptArg(digitalPinToInterrupt(clkPin_), &EncoderEC12::isrThunk, this, CHANGE);
+    return true;
+}
+
+void IRAM_ATTR EncoderEC12::isrThunk(void* arg) {
+    static_cast<EncoderEC12*>(arg)->handleIsr();
+}
+
+void IRAM_ATTR EncoderEC12::handleIsr() {
+
+     // Toggle LED при каждом прерывании
+    digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+
+    const uint32_t now = micros();
+    if (now - lastDebounceUs_ < debounceUs_) {
+        return; // антидребезг
+    }
+    lastDebounceUs_ = now;
+
+    const int currentCLK = digitalRead(clkPin_);
+    const int currentDT  = digitalRead(dtPin_);
+
+    if (currentCLK != lastClk_) {
+        if (currentCLK == LOW) {
+            // Logic: DT=HIGH => шаг -, иначе +
+            const int step = (currentDT == HIGH) ? - 1 : 1;
+            portENTER_CRITICAL_ISR(&mux_);
+            pendingSteps_ += step;
+            portEXIT_CRITICAL_ISR(&mux_);
+        }
+        lastClk_ = currentCLK;
+    }
+}
+
+void EncoderEC12::update() {
+    int32_t delta = 0;
+    taskENTER_CRITICAL(&mux_);
+    delta = pendingSteps_;
+    pendingSteps_ = 0;
+    taskEXIT_CRITICAL(&mux_);
+
+    if (delta != 0 && handler_) {
+        // Склеенный вызов: один колбэк с суммарным сдвигом
+        delta = std::max<int32_t>(-127, std::min<int32_t>(127, delta));
+        handler_(static_cast<int8_t>(delta));
+    }
+}
+
+File: main.cpp
+----------------------------------
+
+
+#include <Arduino.h>
+
+#include "drivers/EncoderEC12.h"
+#include "app/pins.h"
+
+// #define DT_PIN 26
+// #define CLK_PIN 27
+
+
+// Создаём два независимых экземпляра (порядок: CLK, DT)
+static EncoderEC12 encoderA(ENC_A_CLK_PIN, ENC_A_DT_PIN, /*debounceUs*/ 1000);
+
+static volatile int32_t posA = 0;
+
+
+constexpr int STEPS_PER_REV = 20;
+
+static float wrapDegrees(float degrees) {
+    // Нормализация в [0..360)
+    while (degrees < 0)   degrees += 360.0f;
+    while (degrees >= 360.0f) degrees -= 360.0f;
+    return degrees;
+}
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+  Serial.println("Serial активирован");
+  // pinMode(CLK_PIN, INPUT_PULLUP);
+  // pinMode(DT_PIN, INPUT_PULLUP);
+
+  // attachInterrupt(digitalPinToInterrupt(CLK_PIN), readEncoder, CHANGE);
+
+  pinMode(LED_PIN, OUTPUT);        // LED как выход
+  digitalWrite(LED_PIN, LOW);      // Начальное состояние - выключен
+  encoderA.onStep([](int8_t delta){
+        posA += delta;
+        const float deg = wrapDegrees((posA * 360.0f) / STEPS_PER_REV);
+        Serial.printf("[A] pos=%ld  deg=%.1f°  (Δ=%d)\n", posA, deg, delta);
+    });
+
+  encoderA.begin();
+
+  Serial.println("Энкодер запущен (фильтр дребезга активирован)");
+}
+
+void loop() {
+  //  static int lastPos = 0;
+  //  if (lastPos < 10) {
+
+  //   lastPos++;
+  //  }
+  //  lastPos = 30;
+  encoderA.update();
+
+  //   // Предположим 20 шагов = 360°
+  //   float degrees = (encoderPosition * 360.0) / 20.0;
+
+  //   while (degrees < 0) degrees += 360;
+  //   while (degrees >= 360) degrees -= 360;
+
+  //   Serial.printf("Позиция: %d | Угол: %.1f°\n", encoderPosition, degrees);
+  // }
+}
+
+
+

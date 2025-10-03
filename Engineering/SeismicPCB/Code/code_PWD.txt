@@ -1,0 +1,126 @@
+File: main.cpp
+----------------------
+
+#include <Arduino.h>
+
+// Настройки PWM
+const int PWM1_PA17_PIN = 17;           // GPIO 17 для управления транзисторной сборкой
+const int PWM1_CHANNEL = 0;        // PWM канал (0-15)
+const int PWM1_FREQ = 1250;        // Частота PWM 1кГц (подходит для большинства транзисторов)
+const int PWM1_RESOLUTION = 10;    // 10-бит разрешение (0-1023) для точного управления
+
+// Переменные для управления
+int currentDutyCycle = 0;
+int targetDutyCycle = 0;
+
+
+// Настройка Serial
+void serialSetup(){
+
+  Serial.begin(115200);
+
+  Serial.println("ESP32-S3 PWM Control for Transistor Array");
+  Serial.println("Pin: 37, Frequency: 1kHz, Resolution: 10-bit (0-1023)");
+  Serial.println("Commands: 0-100 (percentage), 'off', 'on', 'test'");
+}
+
+void setupPWM(){
+
+  // Настройка PWM канала
+  ledcSetup(PWM1_CHANNEL, PWM1_FREQ, PWM1_RESOLUTION);
+  
+  // Привязка PWM канала к пину 17
+  ledcAttachPin(PWM1_PA17_PIN, PWM1_CHANNEL);
+  
+  // Начальное состояние - выключено
+  ledcWrite(PWM1_CHANNEL, 0);
+}
+
+// Настройка PWM
+void setup() {
+
+  serialSetup();
+  setupPWM();
+      
+}
+
+void setPWMPercent(int percent) {
+  // Ограничиваем значение от 0 до 100%
+  percent = constrain(percent, 0, 100);
+  
+  // Конвертируем проценты в значение duty cycle (0-1023 для 10-бит)
+  int dutyCycle = map(percent, 0, 100, 0, 1023);
+  
+  ledcWrite(PWM1_CHANNEL, dutyCycle);
+  
+  Serial.print("PWM set to: ");
+  Serial.print(percent);
+  Serial.print("% (duty cycle: ");
+  Serial.print(dutyCycle);
+  Serial.println("/1023)");
+}
+
+void setPWMDutyCycle(int dutyCycle) {
+  // Ограничиваем значение от 0 до 1023
+  dutyCycle = constrain(dutyCycle, 0, 1023);
+  
+  ledcWrite(PWM1_CHANNEL, dutyCycle);
+  
+  int percent = map(dutyCycle, 0, 1023, 0, 100);
+  Serial.print("PWM duty cycle: ");
+  Serial.print(dutyCycle);
+  Serial.print("/1023 (");
+  Serial.print(percent);
+  Serial.println("%)");
+}
+
+void runTest() {
+  Serial.println("Running PWM test sequence...");
+  
+  // Тест: плавное увеличение от 0 до 100%
+  Serial.println("Ramping up...");
+  for (int i = 0; i <= 100; i += 5) {
+    setPWMPercent(i);
+    delay(200);
+  }
+  
+  delay(1000);
+  
+  // Тест: плавное уменьшение от 100 до 0%
+  Serial.println("Ramping down...");
+  for (int i = 100; i >= 0; i -= 5) {
+    setPWMPercent(i);
+    delay(200);
+  }
+  
+  Serial.println("Test completed.");
+}
+
+void loop() {
+  // Проверяем команды из Serial Monitor
+  if (Serial.available()) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+    
+    if (command == "off") {
+      setPWMPercent(0);
+    }
+    else if (command == "on") {
+      setPWMPercent(100);
+    }
+    else if (command == "test") {
+      runTest();
+    }
+    else {
+      // Попытка парсить число (проценты)
+      int value = command.toInt();
+      if (value >= 0 && value <= 100) {
+        setPWMPercent(value);
+      } else {
+        Serial.println("Invalid command. Use: 0-100, 'off', 'on', or 'test'");
+      }
+    }
+  }
+  
+  delay(100);
+}
