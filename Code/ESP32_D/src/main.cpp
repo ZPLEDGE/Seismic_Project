@@ -12,7 +12,14 @@
 static AppState appState;
 static CommandQueue commandQueue(10);
 static EncoderEC12 encoderA(ENC_A_CLK_PIN, ENC_A_DT_PIN, 1000);
-static EMSPulseGenerator stim;
+//static EMSPulseGenerator stim;
+
+// 🔥 ДВА НЕЗАВИСИМЫХ ГЕНЕРАТОРА
+// Генератор 1: PWM канал 0, пин 1, частота 144 Гц, разрешение 10 бит
+EMSPulseGenerator pwm_stim_1(0, PWM_CH_1_PIN, 144, 10, 70);
+
+// Генератор 2: PWM канал 1, пин 2, частота 144 Гц, разрешение 10 бит
+EMSPulseGenerator pwm_stim_2(1, PWM_CH_2_PIN, 1245, 10, 110);
 
 // ============================================
 // Константы
@@ -295,8 +302,8 @@ void uiTask(void* parameter) {
         uint32_t now = millis();
         if (now - lastStatsTime >= STATS_INTERVAL_MS) {
             lastStatsTime = now;
-            printSystemStats();
-            appState.printCurrentState();
+            //printSystemStats();
+            //appState.printCurrentState();
         }
 
         // Измерение времени
@@ -319,8 +326,14 @@ void stimTask(void* parameter) {
     Serial.printf("[Stim_Task] Started on Core %d\n", stimStats.coreId);
     Serial.printf("[Stim_Task] Stack size: %u bytes\n", STIM_TASK_STACK_SIZE);
 
-    if (!stim.begin()) {
-        Serial.println("[Stim] ERROR: Init failed!");
+    if (!pwm_stim_1.begin()) {
+        Serial.println("[Stim1] ERROR: Init failed!");
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    if (!pwm_stim_2.begin()) {
+        Serial.println("[Stim2] ERROR: Init failed!");
         vTaskDelete(nullptr);
         return;
     }
@@ -330,10 +343,15 @@ void stimTask(void* parameter) {
     // ✅ АВТОЗАПУСК ПРЯМО ЗДЕСЬ
     delay(100);  // Небольшая задержка
     
-    Serial.println("[Stim] Auto-starting stimulation...");
-    stim.start();
+    Serial.println("[Stim1] Auto-starting pwm_stim_1...");
+    pwm_stim_1.start();    
+    Serial.println("[Stim1] ✅ STARTED");
+
+    Serial.println("[Stim2] Auto-starting pwm_stim_2...");
+    pwm_stim_2.start();    
+    Serial.println("[Stim2] ✅ STARTED");
+
     appState.setStimRunning(true);
-    Serial.println("[Stim] ✅ STARTED");
 
     while (true) {
         uint32_t loopStart = micros();
@@ -347,28 +365,32 @@ void stimTask(void* parameter) {
             
             switch (cmd.type) {
                 case CommandType::UPDATE_PARAMS:
-                    stim.setParams(cmd.params.amplitude,
+                    pwm_stim_2.setParams(cmd.params.amplitude,
                                  cmd.params.pulseWidthUs,
                                  cmd.params.rateHz,
                                  cmd.params.burstHz,
                                  cmd.params.burstDutyPercent);
+                                 
                     Serial.println("[Stim] Parameters updated");
                     break;
                 
                 case CommandType::START_STIM:
-                    stim.start();
+                    pwm_stim_1.start();
+                    pwm_stim_2.start();
                     appState.setStimRunning(true);
                     Serial.println("[Stim] ✅ STARTED");
                     break;
                 
                 case CommandType::STOP_STIM:
-                    stim.stop();
+                    pwm_stim_1.stop();
+                    pwm_stim_2.stop();
                     appState.setStimRunning(false);
                     Serial.println("[Stim] ⛔ STOPPED");
                     break;
                 
                 case CommandType::EMERGENCY_STOP:
-                    stim.stop();
+                    pwm_stim_1.stop();
+                    pwm_stim_2.stop();
                     appState.setStimRunning(false);
                     Serial.println("[Stim] 🚨 EMERGENCY STOP!");
                     break;
@@ -380,7 +402,8 @@ void stimTask(void* parameter) {
 
         // Обновление генератора
         if (appState.isStimRunning()) {
-            stim.update();
+            pwm_stim_1.update();
+            pwm_stim_2.update();
         }
 
         uint32_t loopTime = micros() - loopStart;
@@ -479,13 +502,13 @@ void setup() {
     Serial.println("\n[Setup] Sending initial parameters...");
     
     // Отправляем начальные параметры
-    StimParams params = appState.getStimParams();
-    Command updateCmd(CommandType::UPDATE_PARAMS, params);
-    if (commandQueue.send(updateCmd, 100)) {
-        Serial.println("[Setup] ✓ Initial parameters sent");
-    } else {
-        Serial.println("[Setup] ✗ Failed to send parameters!");
-    }
+    // StimParams params = appState.getStimParams();
+    // Command updateCmd(CommandType::UPDATE_PARAMS, params);
+    // if (commandQueue.send(updateCmd, 100)) {
+    //     Serial.println("[Setup] ✓ Initial parameters sent");
+    // } else {
+    //     Serial.println("[Setup] ✗ Failed to send parameters!");
+    // }
     
     // Задержка для обработки
     delay(50);

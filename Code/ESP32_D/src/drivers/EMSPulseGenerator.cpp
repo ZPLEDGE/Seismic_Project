@@ -4,9 +4,47 @@
 #include "..\include\drivers\EMSPulseGenerator.h"
 
 // ====== Настройки вывода для стимуляции ======
-static const int PWM1_CH      = 0;     // ledc канал
+//static const int PWM1_CH      = 0;     // ledc канал
 static const int PWM1_RES     = 10;    // 10 бит (0..1023)
-static const int PWM1_FREQ    = 144;  // несущая для ШИМ амплитуды
+//static const int PWM1_FREQ    = 144;  // несущая для ШИМ амплитуды
+
+
+
+// 🔥 Конструктор с параметрами
+EMSPulseGenerator::EMSPulseGenerator(uint8_t pwmChannel, 
+                                     uint8_t outputPin,
+                                     uint32_t pwmFreq, 
+                                     uint8_t pwmResolution,
+                                     uint8_t pwmDuty
+                                    )
+    : pwmChannel_(pwmChannel),
+      outputPin_(outputPin),
+      pwmFreq_(pwmFreq),
+      pwmResolution_(pwmResolution),
+      pwmDuty_(pwmDuty)
+{
+    // Вычисляем максимальное значение duty cycle
+    maxDuty_ = (1 << pwmResolution_) - 1;  // 2^resolution - 1
+    
+    // Инициализация с вашими параметрами
+    amp_ = 10;
+    pwUs_ = 200;
+    rateHz_ = 144;
+    pulsesPerBurst_ = 26;
+    pauseBetweenBurstsMs_ = 235;
+    
+    // Расчет производных параметров
+    pulsePeriodUs_ = 1000000UL / rateHz_;  // 6944 мкс
+    burstDurationUs_ = pulsesPerBurst_ * pulsePeriodUs_;  // 180556 мкс
+    pauseDurationUs_ = pauseBetweenBurstsMs_ * 1000UL;    // 235000 мкс
+    fullCycleUs_ = burstDurationUs_ + pauseDurationUs_;   // 415556 мкс
+    
+    //pwmDuty_ = map(amp_, 0, 100, 0, maxDuty_);
+   // pwmDutypwmDuty_ = 70;
+    
+    Serial.printf("[EMS] Constructor: CH=%d, Pin=%d, Freq=%lu Hz, Res=%d bit (max duty=%d)\n",
+                  pwmChannel_, outputPin_, pwmFreq_, pwmResolution_, maxDuty_);
+}
 
 EMSPulseGenerator::EMSPulseGenerator() {
     // Инициализация с вашими параметрами
@@ -22,14 +60,17 @@ EMSPulseGenerator::EMSPulseGenerator() {
     pauseDurationUs_ = pauseBetweenBurstsMs_ * 1000UL;    // 235000 мкс
     fullCycleUs_ = burstDurationUs_ + pauseDurationUs_;   // 415556 мкс
     
-    ampDuty_ = map(amp_, 0, 100, 0, 1023);
+    //pwmDuty_ = map(amp_, 0, 100, 0, 1023);
+
+   // pwmDuty_ = 6;
 }
 
 bool EMSPulseGenerator::begin() {
-    // Настройка LEDC для ШИМ
-    ledcSetup(PWM1_CH, PWM1_FREQ, PWM1_RES);
-    ledcAttachPin(PWM_CH_1_PIN, PWM1_CH);
-    ledcWrite(PWM1_CH, 0);
+
+    // 🔥 Настройка LEDC для этого конкретного канала
+    ledcSetup(pwmChannel_, pwmFreq_, pwmResolution_);
+    ledcAttachPin(outputPin_, pwmChannel_);
+    ledcWrite(pwmChannel_, 0);
     
     // Инициализация временных меток
     lastPulseTs_ = micros();
@@ -38,12 +79,22 @@ bool EMSPulseGenerator::begin() {
     running_ = false;
     
     Serial.println("[EMS] Initialized with parameters:");
-    Serial.printf("  Pulse rate: %d Hz (period: %lu µs)\n", rateHz_, pulsePeriodUs_);
-    Serial.printf("  Pulses per burst: %d\n", pulsesPerBurst_);
-    Serial.printf("  Burst duration: %lu µs (%.1f ms)\n", burstDurationUs_, burstDurationUs_ / 1000.0f);
-    Serial.printf("  Pause duration: %lu µs (%lu ms)\n", pauseDurationUs_, pauseBetweenBurstsMs_);
-    Serial.printf("  Full cycle: %lu µs (%.1f ms, %.2f Hz)\n", 
-                  fullCycleUs_, fullCycleUs_ / 1000.0f, 1000000.0f / fullCycleUs_);
+    Serial.printf("  Pulse rate: %d Hz\n", pwmFreq_);
+    Serial.printf("  Pulse Duty: %d\n", pwmDuty_);
+    // Serial.printf("  Burst duration: %lu µs (%.1f ms)\n", burstDurationUs_, burstDurationUs_ / 1000.0f);
+    // Serial.printf("  Pause duration: %lu µs (%lu ms)\n", pauseDurationUs_, pauseBetweenBurstsMs_);
+    // Serial.printf("  Full cycle: %lu µs (%.1f ms, %.2f Hz)\n", 
+    //               fullCycleUs_, fullCycleUs_ / 1000.0f, 1000000.0f / fullCycleUs_);
+
+
+
+
+    // Serial.printf("  Pulse rate: %d Hz (period: %lu µs)\n", pwmFreq_, pulsePeriodUs_);
+    // Serial.printf("  Pulses per burst: %d\n", pulsesPerBurst_);
+    // Serial.printf("  Burst duration: %lu µs (%.1f ms)\n", burstDurationUs_, burstDurationUs_ / 1000.0f);
+    // Serial.printf("  Pause duration: %lu µs (%lu ms)\n", pauseDurationUs_, pauseBetweenBurstsMs_);
+    // Serial.printf("  Full cycle: %lu µs (%.1f ms, %.2f Hz)\n", 
+    //               fullCycleUs_, fullCycleUs_ / 1000.0f, 1000000.0f / fullCycleUs_);                  
     
     return true;
 }
@@ -60,17 +111,18 @@ void EMSPulseGenerator::start() {
     pulseCountInBurst_ = 0;
     inBurst_ = true;
     
-    Serial.println("[EMS] ✅ Started");
+    Serial.printf("[EMS CH%d] ✅ Started on pin %d\n", pwmChannel_, outputPin_);
 }
 
 void EMSPulseGenerator::stop() {
     running_ = false;
     pulseActive_ = false;
     inBurst_ = false;
-    ledcWrite(PWM1_CH, 0);
-    digitalWrite(PWM_STATE_PIN, LOW);
     
-    Serial.println("[EMS] ⛔ Stopped");
+    // 🔥 Выключаем PWM этого канала
+    ledcWrite(pwmChannel_, 0);
+    
+    Serial.printf("[EMS CH%d] ⛔ Stopped\n", pwmChannel_);
 }
 
 void EMSPulseGenerator::setParams(uint8_t amplitudePercent,
@@ -83,12 +135,12 @@ void EMSPulseGenerator::setParams(uint8_t amplitudePercent,
     pwUs_  = constrain(pulseWidthUs, 50, 500);
     
     // Преобразование амплитуды в значение ШИМ (0..1023)
-    // ampDuty_ = map(amp_, 0, 100, 0, (1 << PWM1_RES) - 1);
-    // if (amp_ <= 0) ampDuty_ = 0;
+    pwmDuty_ = map(amp_, 0, 100, 0, (1 << PWM1_RES) - 1);
+    if (amp_ <= 0) pwmDuty_ = 0;
 
-    ampDuty_ = 8;
+    
 
-    Serial.printf("income = %d , ampDuty = %d ", amplitudePercent, ampDuty_);
+    Serial.printf("income = %d , ampDuty = %d ", amplitudePercent, pwmDuty_);
     // ❌ УБРАЛИ Serial.printf отсюда - он вызывается слишком часто!
 }
 
@@ -110,7 +162,7 @@ void EMSPulseGenerator::update() {
         pulseCountInBurst_ = 0;
         inBurst_ = true;
         pulseActive_ = false;
-        ledcWrite(PWM1_CH, 0);
+        ledcWrite(pwmChannel_, 0);
        // digitalWrite(PWM_STATE_PIN, LOW);
         
        // Serial.printf("[EMS] 🔄 New cycle at %lu µs\n", now);
@@ -126,7 +178,7 @@ void EMSPulseGenerator::update() {
         if (inBurst_) {
             inBurst_ = false;
             pulseActive_ = false;
-            ledcWrite(PWM1_CH, 0);
+            ledcWrite(pwmChannel_, 0);
             digitalWrite(PWM_STATE_PIN, LOW);
            // Serial.printf("[EMS] 💤 Pause (sent %d pulses)\n", pulseCountInBurst_);
         }
@@ -164,7 +216,7 @@ void EMSPulseGenerator::update() {
             nextPulseTs_ += pulsePeriodUs_;  // Планируем следующий импульс
             
             // ✅ Включаем PWM - ОДИН РАЗ!
-            ledcWrite(PWM1_CH, ampDuty_);
+            ledcWrite(pwmChannel_, pwmDuty_);
             digitalWrite(PWM_STATE_PIN, HIGH);
 
             //digitalWrite(PWM_STATE_PIN, !digitalRead(PWM_STATE_PIN));  // Toggle
