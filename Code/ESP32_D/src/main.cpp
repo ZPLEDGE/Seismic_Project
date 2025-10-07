@@ -1,118 +1,512 @@
 #include <Arduino.h>
-
+#include <esp_task_wdt.h>
 #include "drivers/EncoderEC12.h"
 #include "drivers/EMSPulseGenerator.h"
-
 #include "app/pins.h"
+#include "app/AppState.h"
+#include "app/CommandQueue.h"
 
-// #define DT_PIN 26
-// #define CLK_PIN 27
+// ============================================
+// Глобальные объекты
+// ============================================
+static AppState appState;
+static CommandQueue commandQueue(10);
+static EncoderEC12 encoderA(ENC_A_CLK_PIN, ENC_A_DT_PIN, 1000);
+static EMSPulseGenerator stim;
 
-
-// Создаём два независимых экземпляра (порядок: CLK, DT)
-static EncoderEC12 encoderA(ENC_A_CLK_PIN, ENC_A_DT_PIN, /*debounceUs*/ 1000);
-EMSPulseGenerator stim;
-
-
-//Encoder Propreties
-static volatile int32_t posA = 0;
+// ============================================
+// Константы
+// ============================================
 constexpr int STEPS_PER_REV = 20;
+constexpr uint32_t WDT_TIMEOUT_SEC = 5;
 
-// PWD Propreties
-enum class ParamSel { AMP, WIDTH, RATE, BDUTY, BHz };
-ParamSel selected = ParamSel::AMP;
-// Текущие параметры (начальные значения)
-uint8_t  g_amp = 10;     // %
-uint16_t g_pw  = 200;    // мкс
-uint8_t  g_rate= 20;     // Гц
-float    g_bhz = 1.0f;   // Гц
-uint8_t  g_bdy = 20;     // %
+// Настройки производительности
+constexpr uint32_t UI_TASK_DELAY_MS = 10;
+constexpr uint32_t STIM_TASK_DELAY_MS = 0;
+constexpr uint32_t STATS_INTERVAL_MS = 10000;
 
+// Размеры стека
+constexpr uint32_t UI_TASK_STACK_SIZE = 8192;
+constexpr uint32_t STIM_TASK_STACK_SIZE = 8192;
 
-static void applyParams() {
-  stim.setParams(g_amp, g_pw, g_rate, g_bhz, g_bdy);
+// ============================================
+// Task Handles
+// ============================================
+TaskHandle_t uiTaskHandle = nullptr;
+TaskHandle_t stimTaskHandle = nullptr;
+
+ // ============================================
+// Статистика
+// ============================================
+struct TaskStats {
+    uint32_t loopCount = 0;
+    uint32_t lastPrintTime = 0;
+    uint32_t commandsSent = 0;
+    uint32_t commandsReceived = 0;
+    uint32_t maxLoopTime = 0;
+    int8_t coreId = -1;
+    float cpuUsage = 0.0f;
+    
+    // НОВОЕ: Накопительное время выполнения
+    uint64_t totalActiveTimeUs = 0;  // Общее активное время в микросекундах
+};
+
+static TaskStats uiStats;
+static TaskStats stimStats;
+
+// Статистика для расчета загрузки CPU
+struct CpuStats {
+    uint32_t lastUpdateTime = 0;
+    uint64_t lastUiActiveTime = 0;   // ИЗМЕНЕНО: uint64_t
+    uint64_t lastStimActiveTime = 0; // ИЗМЕНЕНО: uint64_t
+    float core0Usage = 0.0f;
+    float core1Usage = 0.0f;
+};
+static CpuStats cpuStats;
+
+// ============================================
+// ИСПРАВЛЕННАЯ функция расчета загрузки CPU
+// ============================================
+static void updateCpuUsage() {
+    uint32_t currentTime = millis();
+    uint32_t deltaTime = currentTime - cpuStats.lastUpdateTime;
+
+    if (deltaTime == 0 || cpuStats.lastUpdateTime == 0) {
+        cpuStats.lastUpdateTime = currentTime;
+        cpuStats.lastUiActiveTime = uiStats.totalActiveTimeUs;
+        cpuStats.lastStimActiveTime = stimStats.totalActiveTimeUs;
+        return;
+    }
+
+    // Рассчитываем активное время за период
+    uint64_t uiActiveUs = uiStats.totalActiveTimeUs - cpuStats.lastUiActiveTime;
+    uint64_t stimActiveUs = stimStats.totalActiveTimeUs - cpuStats.lastStimActiveTime;
+
+    // Переводим deltaTime в микросекунды
+    uint64_t deltaTimeUs = (uint64_t)deltaTime * 1000ULL;
+
+    // Процент загрузки = (активное время / общее время) * 100
+    uiStats.cpuUsage = ((float)uiActiveUs / (float)deltaTimeUs) * 100.0f;
+    stimStats.cpuUsage = ((float)stimActiveUs / (float)deltaTimeUs) * 100.0f;
+
+    // Ограничиваем значения
+    if (uiStats.cpuUsage > 100.0f) uiStats.cpuUsage = 100.0f;
+    if (uiStats.cpuUsage < 0.0f) uiStats.cpuUsage = 0.0f;
+    if (stimStats.cpuUsage > 100.0f) stimStats.cpuUsage = 100.0f;
+    if (stimStats.cpuUsage < 0.0f) stimStats.cpuUsage = 0.0f;
+
+    // Обновляем для следующего расчета
+    cpuStats.lastUpdateTime = currentTime;
+    cpuStats.lastUiActiveTime = uiStats.totalActiveTimeUs;
+    cpuStats.lastStimActiveTime = stimStats.totalActiveTimeUs;
+
+    // Загрузка по ядрам
+    cpuStats.core0Usage = uiStats.cpuUsage;
+    cpuStats.core1Usage = stimStats.cpuUsage;
 }
 
+static void printCoreInfo() {
+    Serial.println("\n╔════════════════════════════════════════════╗");
+    Serial.println("║          Core Assignment Info              ║");
+    Serial.println("╠════════════════════════════════════════════╣");
 
+    Serial.printf("║ setup() on Core: %d                        ║\n", xPortGetCoreID());
 
+    if (uiTaskHandle != nullptr) {
+        BaseType_t core = xTaskGetAffinity(uiTaskHandle);
+        Serial.printf("║ UI_Task on Core: %d                        ║\n",
+                      (core == tskNO_AFFINITY) ? -1 : core);
+    }
+
+    if (stimTaskHandle != nullptr) {
+        BaseType_t core = xTaskGetAffinity(stimTaskHandle);
+        Serial.printf("║ Stim_Task on Core: %d                      ║\n",
+                      (core == tskNO_AFFINITY) ? -1 : core);
+    }
+
+    Serial.println("╚════════════════════════════════════════════╝\n");
+}
 
 static float wrapDegrees(float degrees) {
-    // Нормализация в [0..360)
-    while (degrees < 0)   degrees += 360.0f;
+    while (degrees < 0)       degrees += 360.0f;
     while (degrees >= 360.0f) degrees -= 360.0f;
     return degrees;
 }
-void setup() {
-  Serial.begin(115200);
-  delay(100);
-  Serial.println("Serial Init - Ok...");
-  // pinMode(CLK_PIN, INPUT_PULLUP);
-  // pinMode(DT_PIN, INPUT_PULLUP);
 
-  // attachInterrupt(digitalPinToInterrupt(CLK_PIN), readEncoder, CHANGE);
-
-  // pinMode(STATE_LED_PIN, OUTPUT);        // LED как выход
-  // digitalWrite(STATE_LED_PIN, LOW);      // Начальное состояние - выключен
-
-  pinMode(PWM_STATE_PIN, OUTPUT);        // LED как выход
-  digitalWrite(PWM_STATE_PIN, LOW);      // Начальное состояние - выключен
- 
-// EMS generator
-  if (!stim.begin()) {
-    Serial.println("ERROR: Failed to initialize EMS generator!");
-    return;
-  }
-  else{
-    Serial.println("EMS generator Init - Ok...");
-  }
-
-  applyParams();
-  stim.start();
-  
-//-------------------
-
-// Encoder
-
-  encoderA.onStep([](int8_t delta){
-      posA += delta;
-      const float deg = wrapDegrees((posA * 360.0f) / STEPS_PER_REV);
-      Serial.printf("[A] pos=%ld  deg=%.1f°  (Δ=%d)\n", posA, deg, delta);
-
-
-
-      g_amp = (uint8_t)constrain((int)g_amp + delta, 0, 100);
-
-      Serial.printf("[A] pos=%ld  deg=%.1f°  (Δ=%d) g_amp=%ld\n", posA, deg, delta, g_amp);
-      applyParams();
-
-  });
-
-  if (!encoderA.begin()) {
-    Serial.println("ERROR: Failed to initialize encoder!");
-    return;
-  }else{
-    Serial.println("Encoder Init - Ok...");
-  }
-
-
+static void printTaskInfo(const char* taskName, const TaskStats& stats) {
+    Serial.printf("[%s] Core:%d Loops:%lu Cmds:%lu MaxLoop:%lu µs CPU:%.1f%%\n",
+                  taskName,
+                  stats.coreId,
+                  stats.loopCount,
+                  (taskName[0] == 'U') ? stats.commandsSent : stats.commandsReceived,
+                  stats.maxLoopTime,
+                  stats.cpuUsage);
 }
 
+static void printSystemStats() {
+    // Обновляем статистику загрузки CPU
+    updateCpuUsage();
+
+    Serial.println("\n╔════════════════════════════════════════════╗");
+    Serial.println("║          System Statistics                 ║");
+    Serial.println("╠════════════════════════════════════════════╣");
+
+    // Информация о задачах
+    printTaskInfo("UI_Task  ", uiStats);
+    printTaskInfo("Stim_Task", stimStats);
+
+    // Информация о стеке
+    if (uiTaskHandle != nullptr) {
+        UBaseType_t waterMark = uxTaskGetStackHighWaterMark(uiTaskHandle);
+        Serial.printf("║ UI Stack Free: %u bytes                ║\n", waterMark * 4);
+        if (waterMark < 512) {
+            Serial.println("║ ⚠️  WARNING: UI Stack Low!              ║");
+        }
+    }
+
+    if (stimTaskHandle != nullptr) {
+        UBaseType_t waterMark = uxTaskGetStackHighWaterMark(stimTaskHandle);
+        Serial.printf("║ Stim Stack Free: %u bytes              ║\n", waterMark * 4);
+        if (waterMark < 512) {
+            Serial.println("║ ⚠️  WARNING: Stim Stack Low!            ║");
+        }
+    }
+
+    // Информация о памяти
+    Serial.printf("║ Free Heap: %u bytes                    ║\n", ESP.getFreeHeap());
+    Serial.printf("║ Min Free Heap: %u bytes                ║\n", ESP.getMinFreeHeap());
+
+    // Информация о CPU
+    Serial.printf("║ CPU Freq: %u MHz                       ║\n", ESP.getCpuFreqMHz());
+
+    // Загрузка ядер CPU
+    Serial.println("║                                            ║");
+    Serial.printf("║ Core 0 Usage: %.1f%%                      ║\n", cpuStats.core0Usage);
+    Serial.printf("║ Core 1 Usage: %.1f%%                      ║\n", cpuStats.core1Usage);
+
+    // Проверка dual-core
+    Serial.printf("║ Dual-Core: %s                          ║\n",
+                  (uiStats.coreId != stimStats.coreId) ? "✅ YES" : "❌ NO");
+
+    Serial.println("╚════════════════════════════════════════════╝\n");
+
+    // Сброс статистики
+    uiStats.maxLoopTime = 0;
+    stimStats.maxLoopTime = 0;
+}
+
+ // Функция для вывода детальной информации о задачах
+static void printDetailedTaskStats() {
+    Serial.println("\n╔════════════════════════════════════════════════════════════════╗");
+    Serial.println("║                    Detailed Task Statistics                    ║");
+    Serial.println("╠════════════════════════════════════════════════════════════════╣");
+
+    // Информация о наших задачах
+    Serial.println("║ Our Tasks:                                                     ║");
+    Serial.printf("║   UI_Task:   Core %d, Loops: %lu, CPU: %.1f%%\n",
+                  uiStats.coreId, uiStats.loopCount, uiStats.cpuUsage);
+    Serial.printf("║   Stim_Task: Core %d, Loops: %lu, CPU: %.1f%%\n",
+                  stimStats.coreId, stimStats.loopCount, stimStats.cpuUsage);
+
+    Serial.println("║                                                                ║");
+
+    // Информация о стеке
+    if (uiTaskHandle != nullptr) {
+        UBaseType_t waterMark = uxTaskGetStackHighWaterMark(uiTaskHandle);
+        Serial.printf("║   UI Stack Free: %u bytes\n", waterMark * 4);
+    }
+
+    if (stimTaskHandle != nullptr) {
+        UBaseType_t waterMark = uxTaskGetStackHighWaterMark(stimTaskHandle);
+        Serial.printf("║   Stim Stack Free: %u bytes\n", waterMark * 4);
+    }
+
+    Serial.println("║                                                                ║");
+
+    // Общая информация о системе
+    Serial.printf("║ Total Tasks: %u\n", uxTaskGetNumberOfTasks());
+    Serial.printf("║ Free Heap: %u bytes\n", ESP.getFreeHeap());
+    Serial.printf("║ Min Free Heap: %u bytes\n", ESP.getMinFreeHeap());
+    Serial.printf("║ CPU Freq: %u MHz\n", ESP.getCpuFreqMHz());
+
+    Serial.println("║                                                                ║");
+    Serial.println("║ Note: CPU usage is approximate, based on loop counters        ║");
+    Serial.println("╚════════════════════════════════════════════════════════════════╝\n");
+}
+
+// ============================================
+// CORE 0: UI Task
+// ============================================
+// ============================================
+// CORE 0: UI Task
+// ============================================
+void uiTask(void* parameter) {
+    // Сохраняем ID ядра
+    uiStats.coreId = xPortGetCoreID();
+    
+    int32_t encoderPos = 0;
+    uint32_t lastStatsTime = millis();
+
+    Serial.printf("[UI_Task] Started on Core %d\n", uiStats.coreId);
+    Serial.printf("[UI_Task] Stack size: %u bytes\n", UI_TASK_STACK_SIZE);
+
+    // ✅ НАСТРОЙКА ЭНКОДЕРА
+    encoderA.onStep([&encoderPos](int8_t delta) {
+        encoderPos += delta;
+        const float deg = wrapDegrees((encoderPos * 360.0f) / STEPS_PER_REV);
+
+        // Изменяем параметры
+        if (appState.adjustCurrentParam(delta)) {
+            Command cmd(CommandType::UPDATE_PARAMS, appState.getStimParams());
+
+            if (commandQueue.send(cmd, 10)) {
+                uiStats.commandsSent++;
+
+                Serial.printf("[UI] Enc: pos=%ld deg=%.1f° Δ=%d\n",
+                              encoderPos, deg, delta);
+                Serial.printf("[UI] %s = %s\n",
+                              appState.getParamName(appState.getCurrentParam()),
+                              appState.getCurrentParamValueStr().c_str());
+            } else {
+                Serial.println("[UI] WARN: Queue full!");
+            }
+        }
+    });
+
+    // ✅ ИНИЦИАЛИЗАЦИЯ ЭНКОДЕРА
+    if (!encoderA.begin()) {
+        Serial.println("[UI] ERROR: Encoder init failed!");
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    Serial.println("[UI] ✓ Encoder initialized");
+
+    // Основной цикл
+    while (true) {
+        uint32_t loopStart = micros();
+        
+        uiStats.loopCount++;
+
+        // ✅ Обновление энкодера
+        encoderA.update();
+
+        // Периодическая статистика
+        uint32_t now = millis();
+        if (now - lastStatsTime >= STATS_INTERVAL_MS) {
+            lastStatsTime = now;
+            printSystemStats();
+            appState.printCurrentState();
+        }
+
+        // Измерение времени
+        uint32_t loopTime = micros() - loopStart;
+        if (loopTime > uiStats.maxLoopTime) {
+            uiStats.maxLoopTime = loopTime;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(UI_TASK_DELAY_MS));
+    }
+}
+
+// ============================================
+// CORE 1: Stimulation Task
+// ============================================
+
+void stimTask(void* parameter) {
+    stimStats.coreId = xPortGetCoreID();
+    
+    Serial.printf("[Stim_Task] Started on Core %d\n", stimStats.coreId);
+    Serial.printf("[Stim_Task] Stack size: %u bytes\n", STIM_TASK_STACK_SIZE);
+
+    if (!stim.begin()) {
+        Serial.println("[Stim] ERROR: Init failed!");
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    Serial.println("[Stim] Initialized");
+    
+    // ✅ АВТОЗАПУСК ПРЯМО ЗДЕСЬ
+    delay(100);  // Небольшая задержка
+    
+    Serial.println("[Stim] Auto-starting stimulation...");
+    stim.start();
+    appState.setStimRunning(true);
+    Serial.println("[Stim] ✅ STARTED");
+
+    while (true) {
+        uint32_t loopStart = micros();
+        
+        stimStats.loopCount++;
+
+        // Обработка команд
+        Command cmd;
+        while (commandQueue.receive(cmd, 0)) {
+            stimStats.commandsReceived++;
+            
+            switch (cmd.type) {
+                case CommandType::UPDATE_PARAMS:
+                    stim.setParams(cmd.params.amplitude,
+                                 cmd.params.pulseWidthUs,
+                                 cmd.params.rateHz,
+                                 cmd.params.burstHz,
+                                 cmd.params.burstDutyPercent);
+                    Serial.println("[Stim] Parameters updated");
+                    break;
+                
+                case CommandType::START_STIM:
+                    stim.start();
+                    appState.setStimRunning(true);
+                    Serial.println("[Stim] ✅ STARTED");
+                    break;
+                
+                case CommandType::STOP_STIM:
+                    stim.stop();
+                    appState.setStimRunning(false);
+                    Serial.println("[Stim] ⛔ STOPPED");
+                    break;
+                
+                case CommandType::EMERGENCY_STOP:
+                    stim.stop();
+                    appState.setStimRunning(false);
+                    Serial.println("[Stim] 🚨 EMERGENCY STOP!");
+                    break;
+                
+                default:
+                    break;
+            }
+        }
+
+        // Обновление генератора
+        if (appState.isStimRunning()) {
+            stim.update();
+        }
+
+        uint32_t loopTime = micros() - loopStart;
+        if (loopTime > stimStats.maxLoopTime) {
+            stimStats.maxLoopTime = loopTime;
+        }
+
+        if (STIM_TASK_DELAY_MS > 0) {
+            vTaskDelay(pdMS_TO_TICKS(STIM_TASK_DELAY_MS));
+        } else {
+            taskYIELD();
+        }
+    }
+}
+
+// ============================================
+// Setup
+// ============================================
+void setup() {
+    Serial.begin(115200);
+    delay(100);
+
+    Serial.println("\n");
+    Serial.println("╔════════════════════════════════════════════╗");
+    Serial.println("║   EMS Controller Dual-Core System v1.0     ║");
+    Serial.println("╚════════════════════════════════════════════╝");
+    Serial.printf("Setup running on Core %d\n", xPortGetCoreID());
+    Serial.printf("CPU Frequency: %u MHz\n", ESP.getCpuFreqMHz());
+    Serial.printf("Free Heap: %u bytes\n", ESP.getFreeHeap());
+
+    // GPIO
+    pinMode(PWM_STATE_PIN, OUTPUT);
+    digitalWrite(PWM_STATE_PIN, LOW);
+    Serial.println("✓ GPIO initialized");
+
+    // Command Queue
+    if (!commandQueue.isValid()) {
+        Serial.println("✗ ERROR: Failed to create command queue!");
+        return;
+    }
+    Serial.println("✓ Command queue created");
+
+    // Watchdog
+    esp_task_wdt_init(WDT_TIMEOUT_SEC, true);
+    Serial.printf("✓ Watchdog configured (%d sec timeout)\n", WDT_TIMEOUT_SEC);
+
+    // UI Task на Core 0
+    BaseType_t result = xTaskCreatePinnedToCore(
+        uiTask,
+        "UI_Task",
+        UI_TASK_STACK_SIZE,
+        nullptr,
+        1,
+        &uiTaskHandle,
+        0
+    );
+
+    if (result != pdPASS) {
+        Serial.println("✗ ERROR: Failed to create UI task!");
+        return;
+    }
+    Serial.printf("✓ UI Task created on Core 0 (Stack: %u bytes, Priority: 1)\n",
+                  UI_TASK_STACK_SIZE);
+
+    // Stim Task на Core 1
+    result = xTaskCreatePinnedToCore(
+        stimTask,
+        "Stim_Task",
+        STIM_TASK_STACK_SIZE,
+        nullptr,
+        2,
+        &stimTaskHandle,
+        1
+    );
+
+    if (result != pdPASS) {
+        Serial.println("✗ ERROR: Failed to create Stim task!");
+        return;
+    }
+    Serial.printf("✓ Stim Task created on Core 1 (Stack: %u bytes, Priority: 2)\n",
+                  STIM_TASK_STACK_SIZE);
+
+    // Задержка для инициализации задач
+    delay(200);
+
+    // Проверка привязки к ядрам
+    printCoreInfo();
+
+    Serial.println("\n╔════════════════════════════════════════════╗");
+    Serial.println("║          System Ready!                     ║");
+    Serial.println("╚════════════════════════════════════════════╝\n");
+
+    appState.printCurrentState();
+    
+    // ✅ АВТОМАТИЧЕСКИЙ ЗАПУСК
+    Serial.println("\n[Setup] Sending initial parameters...");
+    
+    // Отправляем начальные параметры
+    StimParams params = appState.getStimParams();
+    Command updateCmd(CommandType::UPDATE_PARAMS, params);
+    if (commandQueue.send(updateCmd, 100)) {
+        Serial.println("[Setup] ✓ Initial parameters sent");
+    } else {
+        Serial.println("[Setup] ✗ Failed to send parameters!");
+    }
+    
+    // Задержка для обработки
+    delay(50);
+    
+    // Автоматически запускаем стимуляцию
+    Command startCmd(CommandType::START_STIM);
+    if (commandQueue.send(startCmd, 100)) {
+        Serial.println("[Setup] ✓ Stimulation AUTO-STARTED");
+    } else {
+        Serial.println("[Setup] ✗ Failed to send START!");
+    }
+    
+    Serial.println("\n🎛️  Rotate encoder to adjust parameters");
+    Serial.println("📊 Statistics every 10 seconds\n");
+}
+
+// ============================================
+// Loop
+// ============================================
 void loop() {
-  //  static int lastPos = 0;
-  //  if (lastPos < 10) {
-
-  //   lastPos++;
-  //  }
-  //  lastPos = 30;
-  encoderA.update();
-  stim.update();
-
-  //   // Предположим 20 шагов = 360°
-  //   float degrees = (encoderPosition * 360.0) / 20.0;
-
-  //   while (degrees < 0) degrees += 360;
-  //   while (degrees >= 360) degrees -= 360;
-
-  //   Serial.printf("Позиция: %d | Угол: %.1f°\n", encoderPosition, degrees);
-  // }
+    // loop() работает на Core 1, но мы его не используем
+    // Спим, чтобы не нагружать CPU
+    vTaskDelay(pdMS_TO_TICKS(1000));
 }

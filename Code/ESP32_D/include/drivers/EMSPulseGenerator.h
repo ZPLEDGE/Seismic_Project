@@ -3,10 +3,11 @@
 
 #include  ".\core\IStimGenerator.h"
 
-// Реализация инкрементного энкодера EC12 (2 канала: CLK/DT)
-// Алгоритм: определение направления на фронтах/спадах CLK по уровню DT.
 class EMSPulseGenerator : public IStimGenerator {
 public:
+
+    //using PulseCallback = std::function<void(uint16_t pulseNumber, uint32_t timestamp)>;
+    //void onPulseEnd(PulseCallback callback) { pulseEndCallback_ = callback; }
 
     EMSPulseGenerator();
     
@@ -23,23 +24,27 @@ public:
     void update() override;
 
 private:
-    uint8_t  amp_ = 0;           // %
-    uint16_t pwUs_ = 200;        // микросек
-    uint8_t  rateHz_ = 20;       // Гц
-    float    bHz_ = 1.0f;        // Гц
-    uint8_t  bDuty_ = 20;        // %
+    uint8_t  amp_ = 10;          // % (начальная амплитуда 10%)
+    uint16_t pwUs_ = 200;        // микросек (длительность импульса)
+    uint8_t  rateHz_ = 144;      // Гц (частота импульсов в пачке)
+    uint8_t  pulsesPerBurst_ = 26;  // количество импульсов в пачке
+    uint32_t pauseBetweenBurstsMs_ = 235;  // пауза между пачками в мс
 
-    // Производные
-    uint32_t pulsePeriodUs_ = 50000; // 20 Гц
-    uint32_t burstPeriodUs_ = 1000000; // 1 Гц
-    uint32_t burstOnUs_     = 200000;  // 20%
-    uint16_t ampDuty_       = 0;       // 0..1023
+    // Производные параметры
+    uint32_t pulsePeriodUs_ = 6944;     // 1/144 Гц = 6944 мкс
+    uint32_t burstDurationUs_ = 180556; // 26 × 6944 = 180556 мкс
+    uint32_t pauseDurationUs_ = 235000; // 235 мс = 235000 мкс
+    uint32_t fullCycleUs_ = 415556;     // 180556 + 235000 = 415556 мкс
+    uint16_t ampDuty_ = 0;              // 0..1023
 
     // Состояние
     bool     running_ = false;
     bool     pulseActive_ = false;
     uint32_t lastPulseTs_ = 0;
-    uint32_t lastBurstTs_ = 0;
-
+    uint32_t nextPulseTs_ = 0;
+    uint32_t burstStartTs_ = 0;
+    uint32_t cycleStartTs_ = 0;
+    uint16_t pulseCountInBurst_ = 0;
+    bool     inBurst_ = false;
 };
 
