@@ -4,7 +4,7 @@
 #include "core/IEncoder.h"
 
 // Реализация энкодера C14 с кастомной логикой обработки
-class EncoderEC12 : public IEncoder {
+class EncoderC14 : public IEncoder {
 public:
     // Используем конструктор базового класса
     using IEncoder::IEncoder;

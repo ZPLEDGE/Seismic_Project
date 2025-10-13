@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <esp_task_wdt.h>
 #include "drivers/EncoderEC12.h"
+#include "drivers/EncoderC14.h"
 #include "drivers/EMSPulseGenerator.h"
 #include "app/pins.h"
 #include "app/AppState.h"
@@ -12,6 +13,7 @@
 static AppState appState;
 static CommandQueue commandQueue(10);
 static EncoderEC12 encoderA(ENC_A_CLK_PIN, ENC_A_DT_PIN, 1000);
+static EncoderC14  encoderB(ENC_B_CLK_PIN, ENC_B_DT_PIN, 1000);
 //static EMSPulseGenerator stim;
 
 // 🔥 ДВА НЕЗАВИСИМЫХ ГЕНЕРАТОРА

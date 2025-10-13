@@ -1,6 +1,6 @@
-#include "drivers/EncoderEC12.h"
+#include "drivers/EncoderC14.h"
 
-void IRAM_ATTR EncoderEC12::handleIsr() {
+void IRAM_ATTR EncoderC14::handleIsr() {
     const uint32_t now = micros();
     if (now - lastDebounceUs_ < debounceUs_) {
         return;
