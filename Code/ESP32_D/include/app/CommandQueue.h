@@ -8,7 +8,7 @@
  * @brief Типы команд для межпроцессорного взаимодействия
  */
 enum class CommandType {
-    UPDATE_PARAMS,  // Обновить параметры стимуляции
+    UPDATE_STIM_1_PARAMS,  // Обновить параметры стимуляции
     START_STIM,     // Запустить стимуляцию
     STOP_STIM,      // Остановить стимуляцию
     GET_STATUS,     // Запросить статус (для будущего использования)
@@ -23,7 +23,7 @@ struct Command {
     StimParams params;
     uint32_t timestamp;  // Для отладки и профилирования
     
-    Command() : type(CommandType::UPDATE_PARAMS), timestamp(0) {}
+    Command() : type(CommandType::UPDATE_STIM_1_PARAMS), timestamp(0) {}
     
     Command(CommandType t) : type(t), timestamp(millis()) {}
     

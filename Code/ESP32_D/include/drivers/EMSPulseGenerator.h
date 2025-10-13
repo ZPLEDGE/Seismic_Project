@@ -22,11 +22,7 @@ public:
     void start() override;
     void stop() override;
 
-    void setParams(uint8_t amplitudePercent,
-                 uint16_t pulseWidthUs,
-                 uint8_t rateHz,
-                 float burstHz,
-                 uint8_t burstDutyPercent) override;
+    void setParams(uint8_t amplitudePercent) override;
 
     void update() override;
 

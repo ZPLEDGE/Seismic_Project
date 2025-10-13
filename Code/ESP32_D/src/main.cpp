@@ -13,7 +13,7 @@
 static AppState appState;
 static CommandQueue commandQueue(10);
 static EncoderEC12 encoderA(ENC_A_CLK_PIN, ENC_A_DT_PIN, 1000);
-static EncoderC14  encoderB(ENC_B_CLK_PIN, ENC_B_DT_PIN, 1000);
+static EncoderC14  encoderB(ENC_B_CLK_PIN, ENC_B_DT_PIN, 50);
 //static EMSPulseGenerator stim;
 
 // 🔥 ДВА НЕЗАВИСИМЫХ ГЕНЕРАТОРА
@@ -246,67 +246,80 @@ static void printDetailedTaskStats() {
 // ============================================
 // CORE 0: UI Task
 // ============================================
-// ============================================
-// CORE 0: UI Task
-// ============================================
 void uiTask(void* parameter) {
-    // Сохраняем ID ядра
     uiStats.coreId = xPortGetCoreID();
-    
-    int32_t encoderPos = 0;
     uint32_t lastStatsTime = millis();
 
     Serial.printf("[UI_Task] Started on Core %d\n", uiStats.coreId);
     Serial.printf("[UI_Task] Stack size: %u bytes\n", UI_TASK_STACK_SIZE);
 
-    // ✅ НАСТРОЙКА ЭНКОДЕРА
-    encoderA.onStep([&encoderPos](int8_t delta) {
-        encoderPos += delta;
-        const float deg = wrapDegrees((encoderPos * 360.0f) / STEPS_PER_REV);
-
-        // Изменяем параметры
-        if (appState.adjustCurrentParam(delta)) {
-            Command cmd(CommandType::UPDATE_PARAMS, appState.getStimParams());
+    // ✅ ЭНКОДЕР A - ИСПРАВЛЕНО: НЕ вызываем getEncoderAState() внутри lambda
+    encoderA.onStep([](int8_t delta) {
+        if (appState.adjustEncoderA(delta)) {
+            Command cmd(CommandType::UPDATE_STIM_1_PARAMS, appState.getStimParams());
 
             if (commandQueue.send(cmd, 10)) {
                 uiStats.commandsSent++;
-
-                Serial.printf("[UI] Enc: pos=%ld deg=%.1f° Δ=%d\n",
-                              encoderPos, deg, delta);
-                Serial.printf("[UI] %s = %s\n",
-                              appState.getParamName(appState.getCurrentParam()),
-                              appState.getCurrentParamValueStr().c_str());
+                
+                // ✅ КРИТИЧНО: Простой вывод без дополнительных вызовов AppState
+                Serial.printf("[UI] Enc A: Δ=%d\n", delta);
             } else {
                 Serial.println("[UI] WARN: Queue full!");
             }
         }
     });
 
-    // ✅ ИНИЦИАЛИЗАЦИЯ ЭНКОДЕРА
+    // ✅ ЭНКОДЕР B - ИСПРАВЛЕНО: НЕ вызываем getEncoderBState() внутри lambda
+    encoderB.onStep([](int8_t delta) {
+        if (appState.adjustEncoderB(delta)) {
+            Command cmd(CommandType::UPDATE_STIM_1_PARAMS, appState.getStimParams());
+
+             if (commandQueue.send(cmd, 10)) {
+                 uiStats.commandsSent++;
+                
+                // ✅ КРИТИЧНО: Простой вывод без дополнительных вызовов AppState
+                Serial.printf("[UI] Enc B: Δ=%d\n", delta);
+            } else {
+                 Serial.println("[UI] WARN: Queue full!");
+            }
+        }
+    });
+
+    // ✅ ИНИЦИАЛИЗАЦИЯ ЭНКОДЕРОВ
     if (!encoderA.begin()) {
-        Serial.println("[UI] ERROR: Encoder init failed!");
+        Serial.println("[UI] ERROR: Encoder A init failed!");
         vTaskDelete(nullptr);
         return;
     }
 
-    Serial.println("[UI] ✓ Encoder initialized");
+    if (!encoderB.begin()) {
+        Serial.println("[UI] ERROR: Encoder B init failed!");
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    Serial.println("[UI] ✓ Encoders initialized");
+    
+    // ✅ Вывод начальных значений ВНЕ lambda
+    Serial.printf("[UI] Encoder A initial value: %d\n", appState.getEncoderAValue());
+    Serial.printf("[UI] Encoder B initial value: %d\n", appState.getEncoderBValue());
 
     // Основной цикл
     while (true) {
         uint32_t loopStart = micros();
-        
         uiStats.loopCount++;
 
-        // ✅ Обновление энкодера
+        // ✅ Обновление обоих энкодеров
         encoderA.update();
+        encoderB.update();
 
         // Периодическая статистика
         uint32_t now = millis();
-        if (now - lastStatsTime >= STATS_INTERVAL_MS) {
-            lastStatsTime = now;
-            //printSystemStats();
-            //appState.printCurrentState();
-        }
+        // if (now - lastStatsTime >= STATS_INTERVAL_MS) {
+        //     lastStatsTime = now;
+        //     printSystemStats();
+        //     appState.printCurrentState();
+        // }
 
         // Измерение времени
         uint32_t loopTime = micros() - loopStart;
@@ -314,7 +327,10 @@ void uiTask(void* parameter) {
             uiStats.maxLoopTime = loopTime;
         }
 
+        uiStats.totalActiveTimeUs += loopTime;
+
         vTaskDelay(pdMS_TO_TICKS(UI_TASK_DELAY_MS));
+        esp_task_wdt_reset();
     }
 }
 
@@ -366,13 +382,8 @@ void stimTask(void* parameter) {
             stimStats.commandsReceived++;
             
             switch (cmd.type) {
-                case CommandType::UPDATE_PARAMS:
-                    pwm_stim_2.setParams(cmd.params.amplitude,
-                                 cmd.params.pulseWidthUs,
-                                 cmd.params.rateHz,
-                                 cmd.params.burstHz,
-                                 cmd.params.burstDutyPercent);
-                                 
+                case CommandType::UPDATE_STIM_1_PARAMS:
+                    pwm_stim_2.setParams(cmd.params.stimDuty);                                 
                     Serial.println("[Stim] Parameters updated");
                     break;
                 
@@ -426,6 +437,15 @@ void stimTask(void* parameter) {
 // ============================================
 void setup() {
     Serial.begin(115200);
+    Serial.setTxBufferSize(1024); // Увеличиваем буфер TX
+    Serial.setRxBufferSize(256);  // Увеличиваем буфер RX
+
+    // Ждем подключения Serial (опционально)
+    uint32_t startTime = millis();
+    while (!Serial && (millis() - startTime < 3000)) {
+        delay(10);
+    }
+
     delay(100);
 
     Serial.println("\n");

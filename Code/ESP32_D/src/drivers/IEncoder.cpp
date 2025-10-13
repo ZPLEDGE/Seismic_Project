@@ -1,15 +1,17 @@
 #include "core/IEncoder.h"
-#include ".\app\pins.h"
+#include "app/pins.h"
 
 bool IEncoder::begin() {
     pinMode(clkPin_, INPUT_PULLUP);
     pinMode(dtPin_,  INPUT_PULLUP);
 
     lastClk_ = digitalRead(clkPin_);
+    lastDt_ = digitalRead(dtPin_);
     lastDebounceUs_ = micros();
 
-    // Отдельное прерывание на CLK с передачей this
-    attachInterruptArg(digitalPinToInterrupt(clkPin_), &IEncoder::isrThunk, this, CHANGE);
+    // Вызываем виртуальный метод для настройки прерываний
+    setupInterrupts();
+    
     return true;
 }
 

@@ -1,13 +1,21 @@
 #include "app/AppState.h"
 
 AppState::AppState() 
-    : currentParam_(ParamType::AMPLITUDE)
-    , stimRunning_(false)
+    : stimRunning_(false)
 {
     mutex_ = xSemaphoreCreateMutex();
     if (mutex_ == nullptr) {
         Serial.println("[AppState] ERROR: Failed to create mutex!");
     }
+    
+    // Инициализация начальных значений
+    encoderAState_.value = 10;
+    encoderAState_.position = 0;
+
+    encoderBState_.value = 10;
+    encoderBState_.position = 0;
+
+    stimParams_.stimDuty = 10;
 }
 
 AppState::~AppState() {
@@ -18,7 +26,7 @@ AppState::~AppState() {
 
 StimParams AppState::getStimParams() const {
     StimParams params;
-    if (xSemaphoreTake(mutex_, portMAX_DELAY) == pdTRUE) {
+    if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
         params = stimParams_;
         xSemaphoreGive(mutex_);
     }
@@ -26,162 +34,161 @@ StimParams AppState::getStimParams() const {
 }
 
 void AppState::setStimParams(const StimParams& params) {
-    if (xSemaphoreTake(mutex_, portMAX_DELAY) == pdTRUE) {
+    if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
         stimParams_ = params;
         applyConstraints(stimParams_);
         xSemaphoreGive(mutex_);
     }
 }
 
-bool AppState::adjustCurrentParam(int8_t delta) {
+uint8_t AppState::getAmplitude() const {
+    uint8_t amp = 0;
+    if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+        amp = stimParams_.stimDuty;
+        xSemaphoreGive(mutex_);
+    }
+    return amp;
+}
+
+void AppState::setAmplitude(uint8_t amp) {
+    if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+        stimParams_.stimDuty = constrain(amp, 0, 100);
+        xSemaphoreGive(mutex_);
+    }
+}
+
+// === Методы для Энкодера A ===
+
+bool AppState::adjustEncoderA(int8_t delta) {
     bool changed = false;
     
-    if (xSemaphoreTake(mutex_, portMAX_DELAY) == pdTRUE) {
-        switch (currentParam_) {
-            case ParamType::AMPLITUDE:
-                stimParams_.amplitude = constrain(
-                    (int)stimParams_.amplitude + delta, 0, 100);
-                changed = true;
-                break;
-                
-            case ParamType::PULSE_WIDTH:
-                stimParams_.pulseWidthUs = constrain(
-                    (int)stimParams_.pulseWidthUs + delta * 10, 50, 400);
-                changed = true;
-                break;
-                
-            case ParamType::RATE:
-                stimParams_.rateHz = constrain(
-                    (int)stimParams_.rateHz + delta, 10, 100);
-                changed = true;
-                break;
-                
-            case ParamType::BURST_HZ:
-                stimParams_.burstHz = constrain(
-                    stimParams_.burstHz + delta * 0.1f, 0.5f, 5.0f);
-                changed = true;
-                break;
-                
-            case ParamType::BURST_DUTY:
-                stimParams_.burstDutyPercent = constrain(
-                    (int)stimParams_.burstDutyPercent + delta, 10, 50);
-                changed = true;
-                break;
+    if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+        encoderAState_.position += delta;
+        
+        // Изменяем значение с ограничением 0-100
+        int newValue = (int)encoderAState_.value + delta;
+        newValue = constrain(newValue, 0, 100);
+        
+        if (newValue != encoderAState_.value) {
+            encoderAState_.value = newValue;
+            // Обновляем общий amplitude
+            stimParams_.stimDuty = encoderAState_.value;
+            changed = true;
         }
+        
         xSemaphoreGive(mutex_);
+    } else {
+        // Таймаут - не логируем каждый раз, чтобы не забивать Serial
+        static uint32_t lastWarnTime = 0;
+        uint32_t now = millis();
+        if (now - lastWarnTime > 1000) {
+            lastWarnTime = now;
+            Serial.println("[AppState] WARN: Mutex timeout in adjustEncoderA");
+        }
     }
     
     return changed;
 }
 
-void AppState::selectNextParam() {
-    if (xSemaphoreTake(mutex_, portMAX_DELAY) == pdTRUE) {
-        int next = (int)currentParam_ + 1;
-        if (next > (int)ParamType::BURST_DUTY) {
-            next = 0;
+EncoderState AppState::getEncoderAState() const {
+    EncoderState state;
+    if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+        state = encoderAState_;
+        xSemaphoreGive(mutex_);
+    }
+    return state;
+}
+
+uint8_t AppState::getEncoderAValue() const {
+    uint8_t value = 0;
+    if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+        value = encoderAState_.value;
+        xSemaphoreGive(mutex_);
+    }
+    return value;
+}
+
+// === Методы для Энкодера B ===
+
+bool AppState::adjustEncoderB(int8_t delta) {
+    bool changed = false;
+    
+    if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+        encoderBState_.position += delta;
+        
+        // Изменяем значение с ограничением 0-100
+        int newValue = (int)encoderBState_.value + delta;
+        newValue = constrain(newValue, 0, 100);
+        
+        if (newValue != encoderBState_.value) {
+            encoderBState_.value = newValue;
+            // Обновляем общий amplitude
+            //stimParams_.amplitude = encoderBState_.value;
+            changed = true;
         }
-        currentParam_ = (ParamType)next;
+        
         xSemaphoreGive(mutex_);
-    }
-}
-
-void AppState::selectPrevParam() {
-    if (xSemaphoreTake(mutex_, portMAX_DELAY) == pdTRUE) {
-        int prev = (int)currentParam_ - 1;
-        if (prev < 0) {
-            prev = (int)ParamType::BURST_DUTY;
+    } else {
+        // Таймаут - не логируем каждый раз
+        static uint32_t lastWarnTime = 0;
+        uint32_t now = millis();
+        if (now - lastWarnTime > 1000) {
+            lastWarnTime = now;
+            Serial.println("[AppState] WARN: Mutex timeout in adjustEncoderB");
         }
-        currentParam_ = (ParamType)prev;
-        xSemaphoreGive(mutex_);
     }
+    
+    return changed;
 }
 
-void AppState::setCurrentParam(ParamType param) {
-    if (xSemaphoreTake(mutex_, portMAX_DELAY) == pdTRUE) {
-        currentParam_ = param;
+EncoderState AppState::getEncoderBState() const {
+    EncoderState state;
+    if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+        state = encoderBState_;
         xSemaphoreGive(mutex_);
     }
+    return state;
 }
 
-ParamType AppState::getCurrentParam() const {
-    ParamType param = ParamType::AMPLITUDE;
-    if (xSemaphoreTake(mutex_, portMAX_DELAY) == pdTRUE) {
-        param = currentParam_;
+uint8_t AppState::getEncoderBValue() const {
+    uint8_t value = 0;
+    if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+        value = encoderBState_.value;
         xSemaphoreGive(mutex_);
     }
-    return param;
+    return value;
 }
+
+// === Вспомогательные методы ===
 
 void AppState::printCurrentState() const {
-    StimParams params = getStimParams();
-    ParamType current = getCurrentParam();
+    // ✅ КРИТИЧНО: Захватываем мьютекс ОДИН РАЗ для всех данных
+    StimParams params;
+    EncoderState encA;
+    EncoderState encB;
+    bool running = isStimRunning();
     
-    Serial.println("╔════════════════════════════════════╗");
-    Serial.printf( "║ Current Param: %-19s ║\n", getParamName(current));
-    Serial.println("╠════════════════════════════════════╣");
-    Serial.printf( "║ Amplitude:     %3d%%               ║\n", params.amplitude);
-    Serial.printf( "║ Pulse Width:   %3d µs             ║\n", params.pulseWidthUs);
-    Serial.printf( "║ Rate:          %3d Hz             ║\n", params.rateHz);
-    Serial.printf( "║ Burst Hz:      %4.1f Hz            ║\n", params.burstHz);
-    Serial.printf( "║ Burst Duty:    %3d%%               ║\n", params.burstDutyPercent);
-    Serial.println("╚════════════════════════════════════╝");
-}
-
-const char* AppState::getParamName(ParamType type) const {
-    switch(type) {
-        case ParamType::AMPLITUDE:    return "AMPLITUDE";
-        case ParamType::PULSE_WIDTH:  return "PULSE_WIDTH";
-        case ParamType::RATE:         return "RATE";
-        case ParamType::BURST_HZ:     return "BURST_HZ";
-        case ParamType::BURST_DUTY:   return "BURST_DUTY";
-        default:                      return "UNKNOWN";
-    }
-}
-
-String AppState::getCurrentParamValueStr() const {
-    StimParams params = getStimParams();
-    ParamType current = getCurrentParam();
-    
-    switch(current) {
-        case ParamType::AMPLITUDE:
-            return String(params.amplitude) + "%";
-        case ParamType::PULSE_WIDTH:
-            return String(params.pulseWidthUs) + "µs";
-        case ParamType::RATE:
-            return String(params.rateHz) + "Hz";
-        case ParamType::BURST_HZ:
-            return String(params.burstHz, 1) + "Hz";
-        case ParamType::BURST_DUTY:
-            return String(params.burstDutyPercent) + "%";
-        default:
-            return "?";
-    }
-}
-
-void AppState::getParamRange(ParamType type, int& min, int& max, int& step) const {
-    switch(type) {
-        case ParamType::AMPLITUDE:
-            min = 0; max = 100; step = 1;
-            break;
-        case ParamType::PULSE_WIDTH:
-            min = 50; max = 400; step = 10;
-            break;
-        case ParamType::RATE:
-            min = 10; max = 100; step = 1;
-            break;
-        case ParamType::BURST_HZ:
-            min = 5; max = 50; step = 1; // *0.1
-            break;
-        case ParamType::BURST_DUTY:
-            min = 10; max = 50; step = 1;
-            break;
+    if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+        params = stimParams_;
+        encA = encoderAState_;
+        encB = encoderBState_;
+        xSemaphoreGive(mutex_);
+        
+        // Вывод ПОСЛЕ освобождения мьютекса
+        Serial.println("╔════════════════════════════════════════════════════╗");
+        Serial.printf( "║ Encoder A: value=%3d  position=%6ld          ║\n", 
+                       encA.value, encA.position);
+        Serial.printf( "║ Encoder B: value=%3d  position=%6ld          ║\n", 
+                       encB.value, encB.position);
+        Serial.println("╠════════════════════════════════════════════════════╣");
+        Serial.printf( "║ Final Amplitude: %3d%%                            ║\n", 
+                       params.stimDuty);
+        Serial.printf( "║ Stim Running: %s                                 ║\n", 
+                       running ? "YES" : "NO ");
+        Serial.println("╚════════════════════════════════════════════════════╝");
     }
 }
 
 void AppState::applyConstraints(StimParams& params) const {
-    params.amplitude = constrain(params.amplitude, 0, 100);
-    params.pulseWidthUs = constrain(params.pulseWidthUs, 50, 400);
-    params.rateHz = constrain(params.rateHz, 10, 100);
-    params.burstHz = constrain(params.burstHz, 0.5f, 5.0f);
-    params.burstDutyPercent = constrain(params.burstDutyPercent, 10, 50);
+    params.stimDuty = constrain(params.stimDuty, 0, 100);
 }

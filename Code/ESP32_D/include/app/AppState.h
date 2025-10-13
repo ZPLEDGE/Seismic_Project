@@ -5,43 +5,35 @@
 #include <atomic>
 
 /**
- * @brief Типы параметров стимуляции для UI
+ * @brief POD структура параметров стимуляции
+ * Plain Old Data - можно безопасно копировать между потоками
+ * УПРОЩЕННАЯ ВЕРСИЯ: только амплитуда
  */
-enum class ParamType { 
-    AMPLITUDE,      // Амплитуда 0-100%
-    PULSE_WIDTH,    // Длительность импульса 50-400 мкс
-    RATE,           // Частота 10-100 Гц
-    BURST_HZ,       // Частота пачек 0.5-5.0 Гц
-    BURST_DUTY      // Скважность пачек 10-50%
+struct StimParams {
+    uint8_t stimDuty;  // Амплитуда 0-100%
+    
+    // Конструктор с безопасным значением по умолчанию
+    StimParams() 
+        : stimDuty(10)
+    {}
+    
+    // Конструктор с параметром
+    explicit StimParams(uint8_t duty)
+        : stimDuty(duty)
+    {}
 };
 
 /**
- * @brief POD структура параметров стимуляции
- * Plain Old Data - можно безопасно копировать между потоками
+ * @brief Состояние одного энкодера
+ * Хранит текущую позицию энкодера
  */
-struct StimParams {
-    uint8_t  amplitude;         // %
-    uint16_t pulseWidthUs;      // мкс
-    uint8_t  rateHz;            // Гц
-    float    burstHz;           // Гц
-    uint8_t  burstDutyPercent;  // %
+struct EncoderState {
+    int32_t position;  // Текущая позиция энкодера
+    uint8_t value;     // Текущее значение (0-100)
     
-    // Конструктор с безопасными значениями по умолчанию
-    StimParams() 
-        : amplitude(10)
-        , pulseWidthUs(200)
-        , rateHz(20)
-        , burstHz(1.0f)
-        , burstDutyPercent(20)
-    {}
-    
-    // Конструктор с параметрами
-    StimParams(uint8_t amp, uint16_t pw, uint8_t rate, float bhz, uint8_t bduty)
-        : amplitude(amp)
-        , pulseWidthUs(pw)
-        , rateHz(rate)
-        , burstHz(bhz)
-        , burstDutyPercent(bduty)
+    EncoderState() 
+        : position(0)
+        , value(10)
     {}
 };
 
@@ -50,6 +42,11 @@ struct StimParams {
  * 
  * Обеспечивает безопасный доступ к параметрам из разных ядер ESP32.
  * Использует мьютексы для защиты критических секций.
+ * 
+ * УПРОЩЕННАЯ ВЕРСИЯ:
+ * - Только amplitude в StimParams
+ * - Два независимых энкодера (A и B)
+ * - Каждый энкодер управляет своим значением amplitude
  */
 class AppState {
 public:
@@ -75,36 +72,60 @@ public:
     void setStimParams(const StimParams& params);
     
     /**
-     * @brief Изменить текущий выбранный параметр на delta
+     * @brief Получить значение amplitude (thread-safe)
+     * @return Текущее значение amplitude (0-100)
+     */
+    uint8_t getAmplitude() const;
+    
+    /**
+     * @brief Установить значение amplitude (thread-safe)
+     * @param amp Новое значение amplitude (0-100)
+     */
+    void setAmplitude(uint8_t amp);
+    
+    // === Методы для работы с Энкодером A ===
+    
+    /**
+     * @brief Изменить значение энкодера A на delta
      * @param delta Изменение значения (может быть отрицательным)
-     * @return true если параметр был изменен
+     * @return true если значение было изменено
      */
-    bool adjustCurrentParam(int8_t delta);
+    bool adjustEncoderA(int8_t delta);
     
     /**
-     * @brief Переключиться на следующий параметр
+     * @brief Получить состояние энкодера A
+     * @return Копия состояния энкодера A
      */
-    void selectNextParam();
+    EncoderState getEncoderAState() const;
     
     /**
-     * @brief Переключиться на предыдущий параметр
+     * @brief Получить значение энкодера A
+     * @return Текущее значение (0-100)
      */
-    void selectPrevParam();
+    uint8_t getEncoderAValue() const;
+    
+    // === Методы для работы с Энкодером B ===
     
     /**
-     * @brief Установить конкретный параметр для редактирования
-     * @param param Тип параметра
+     * @brief Изменить значение энкодера B на delta
+     * @param delta Изменение значения (может быть отрицательным)
+     * @return true если значение было изменено
      */
-    void setCurrentParam(ParamType param);
+    bool adjustEncoderB(int8_t delta);
     
     /**
-     * @brief Получить текущий выбранный параметр
-     * @return Тип текущего параметра
+     * @brief Получить состояние энкодера B
+     * @return Копия состояния энкодера B
      */
-    ParamType getCurrentParam() const;
+    EncoderState getEncoderBState() const;
+    
+    /**
+     * @brief Получить значение энкодера B
+     * @return Текущее значение (0-100)
+     */
+    uint8_t getEncoderBValue() const;
     
     // === Atomic флаги состояния (быстрый доступ без мьютекса) ===
-    // ВАЖНО: эти методы должны быть inline и определены в заголовке
     
     bool isStimRunning() const { return stimRunning_.load(); }
     void setStimRunning(bool running) { stimRunning_.store(running); }
@@ -115,25 +136,11 @@ public:
      * @brief Вывести текущее состояние в Serial
      */
     void printCurrentState() const;
-    
-    /**
-     * @brief Получить имя параметра
-     */
-    const char* getParamName(ParamType type) const;
-    
-    /**
-     * @brief Получить текущее значение выбранного параметра как строку
-     */
-    String getCurrentParamValueStr() const;
-    
-    /**
-     * @brief Получить диапазон значений для параметра
-     */
-    void getParamRange(ParamType type, int& min, int& max, int& step) const;
 
 private:
     StimParams stimParams_;
-    ParamType currentParam_;
+    EncoderState encoderAState_;  // Состояние энкодера A
+    EncoderState encoderBState_;  // Состояние энкодера B
     mutable SemaphoreHandle_t mutex_;  // mutable для const методов
     std::atomic<bool> stimRunning_{false};
     
