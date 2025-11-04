@@ -1,0 +1,16 @@
+#define ILI9341_DRIVER
+#define TFT_MOSI 23
+#define TFT_MISO 19
+#define TFT_SCLK 18
+#define TFT_CS   5
+#define TFT_DC   4
+#define TFT_RST  2
+#define TFT_BL   15
+
+
+#define TOUCH_CS   14   // ваш пин CS тача (TCS на плате)
+#define TOUCH_IRQ  27   // ваш пин PEN/IRQ (PEN на плате)
+#define SPI_TOUCH_FREQUENCY 2500000
+
+#define SPI_FREQUENCY       40000000
+#define SPI_READ_FREQUENCY  16000000
